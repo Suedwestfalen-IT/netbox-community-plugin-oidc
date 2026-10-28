@@ -1,0 +1,69 @@
+{% extends 'generic/_base.html' %}
+{% load helpers %}
+
+{% block title %}Keycloak OIDC{% endblock %}
+
+{% block subtitle %}
+  <div class="text-secondary">
+    {% if healthy %}
+      <span class="badge text-bg-green">Keycloak connection OK</span>
+    {% else %}
+      <span class="badge text-bg-red">Keycloak connection has problems</span>
+    {% endif %}
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div class="row">
+    <div class="col col-12 col-xl-7">
+      <div class="card">
+        <h2 class="card-header">Checks</h2>
+        <table class="table table-hover attr-table">
+          {% for result in results %}
+            <tr>
+              <th scope="row">{{ result.name }}</th>
+              <td>
+                {% if result.status == 'ok' %}
+                  <span class="badge text-bg-green">OK</span>
+                {% elif result.status == 'warning' %}
+                  <span class="badge text-bg-yellow">Warning</span>
+                {% else %}
+                  <span class="badge text-bg-red">Failed</span>
+                {% endif %}
+              </td>
+              <td><code>{{ result.detail }}</code></td>
+            </tr>
+          {% endfor %}
+        </table>
+      </div>
+    </div>
+    <div class="col col-12 col-xl-5">
+      <div class="card">
+        <h2 class="card-header">Plugin settings</h2>
+        <table class="table table-hover attr-table">
+          {% for name, value in settings.items %}
+            <tr>
+              <th scope="row">{{ name }}</th>
+              <td><code>{{ value }}</code></td>
+            </tr>
+          {% endfor %}
+        </table>
+      </div>
+      <div class="card">
+        <h2 class="card-header">Your session</h2>
+        <table class="table table-hover attr-table">
+          <tr>
+            <th scope="row">Logged in via Keycloak</th>
+            <td>{% checkmark keycloak_session %}</td>
+          </tr>
+          {% if keycloak_session %}
+            <tr>
+              <th scope="row">Last validated</th>
+              <td>{{ last_check|isodatetime }}</td>
+            </tr>
+          {% endif %}
+        </table>
+      </div>
+    </div>
+  </div>
+{% endblock %}

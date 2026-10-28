@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox-keycloak-oidc"
+dynamic = ["version"]
+description = "NetBox plugin: login via Keycloak (OpenID Connect) with role mapping and session validation"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Suedwestfalen-IT" }]
+classifiers = [
+    "Framework :: Django",
+    "Programming Language :: Python :: 3",
+]
+# social-auth-core / social-auth-app-django and PyJWT ship with NetBox
+
+[project.urls]
+Source = "https://github.com/Suedwestfalen-IT/netbox-community-plugin-oidc"
+
+[tool.setuptools.dynamic]
+version = { attr = "netbox_keycloak_oidc.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["netbox_keycloak_oidc*"]
+
+[tool.setuptools.package-data]
+netbox_keycloak_oidc = ["templates/**/*.html"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "RET", "UP"]
+ignore = ["RET504"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["netbox_keycloak_oidc"]
+
+[tool.ruff.format]
+quote-style = "single"

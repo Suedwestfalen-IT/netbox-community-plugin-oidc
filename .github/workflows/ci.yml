@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        netbox: ["v4.4.10", "main"]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: netbox
+          POSTGRES_PASSWORD: netbox
+          POSTGRES_DB: netbox
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: plugin
+      - uses: actions/checkout@v4
+        with:
+          repository: netbox-community/netbox
+          ref: ${{ matrix.netbox }}
+          path: netbox
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          pip install -r netbox/requirements.txt
+          pip install -e plugin ruff
+      - name: Lint
+        working-directory: plugin
+        run: ruff check
+      - name: Test
+        working-directory: netbox/netbox
+        env:
+          NETBOX_CONFIGURATION: testing.configuration
+          PYTHONPATH: ${{ github.workspace }}/plugin
+        run: python manage.py test netbox_keycloak_oidc
