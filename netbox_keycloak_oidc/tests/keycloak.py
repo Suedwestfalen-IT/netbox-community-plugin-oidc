@@ -18,6 +18,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 ISSUER = 'https://keycloak.test/realms/netbox'
 CLIENT_ID = 'netbox'
 CLIENT_SECRET = 'secret'
+SCIM_URL = f'{ISSUER}/scim/v2'
+SCIM_CLIENT_ID = 'netbox-scim'
+SCIM_CLIENT_SECRET = 'scim-secret'
 
 
 def generate_key():
@@ -38,6 +41,11 @@ class FakeKeycloak:
         # Overrides for the next issued tokens (e.g. to tamper with claims)
         self.id_token_overrides = {}
         self.signing_key = None
+        # SCIM API
+        self.scim_enabled = True
+        self.scim_page_size = 100
+        self.service_accounts = {CLIENT_ID: CLIENT_SECRET, SCIM_CLIENT_ID: SCIM_CLIENT_SECRET}
+        self.scim_audience = True
 
     # Users
 
@@ -53,6 +61,7 @@ class FakeKeycloak:
             'client_roles': list(client_roles),
             'groups': list(groups),
             'enabled': True,
+            'admin': False,
         }
         return self.users[username]
 
@@ -129,6 +138,14 @@ class FakeKeycloak:
 
     def token(self, data, auth):
         client_id, client_secret = auth or (data.get('client_id'), data.get('client_secret'))
+        if data['grant_type'] == 'client_credentials':
+            if self.service_accounts.get(client_id) != client_secret:
+                return 401, {'error': 'invalid_client'}
+            now = int(time.time())
+            return 200, {'access_token': self.sign({
+                'iss': ISSUER, 'sub': f'service-account-{client_id}', 'azp': client_id, 'typ': 'Bearer',
+                'aud': [SCIM_URL] if self.scim_audience else ['realm-management'], 'exp': now + 300, 'iat': now,
+            }), 'token_type': 'Bearer', 'expires_in': 300}
         if (client_id, client_secret) != (CLIENT_ID, CLIENT_SECRET):
             return 401, {'error': 'invalid_client'}
         if data['grant_type'] == 'authorization_code':
@@ -153,6 +170,62 @@ class FakeKeycloak:
         user = next(u for u in self.users.values() if u['sub'] == claims['sub'])
         return 200, {k: user[k] for k in ('sub', 'preferred_username', 'email', 'given_name', 'family_name')}
 
+    # SCIM
+
+    @staticmethod
+    def group_id(name):
+        return f'group-{name}'
+
+    def scim_groups(self):
+        names = sorted({g.rstrip('/').rsplit('/', 1)[-1] for u in self.users.values() for g in u['groups']})
+        return [{
+            'schemas': ['urn:ietf:params:scim:schemas:core:2.0:Group'],
+            'id': self.group_id(name),
+            'displayName': name,
+            'members': [
+                {'value': u['sub'], 'display': n, 'type': 'User'}
+                for n, u in self.users.items() if name in [g.rstrip('/').rsplit('/', 1)[-1] for g in u['groups']]
+            ],
+        } for name in names]
+
+    def scim_user(self, username):
+        user = self.users[username]
+        resource = {'schemas': ['urn:ietf:params:scim:schemas:core:2.0:User'], 'id': user['sub'], 'userName': username}
+        if user['admin']:
+            # Keycloak only exposes a minimal representation of administrative users
+            return resource
+        groups = [g.rstrip('/').rsplit('/', 1)[-1] for g in user['groups']]
+        resource.update({
+            'name': {'givenName': user['given_name'], 'familyName': user['family_name']},
+            'emails': [{'value': user['email'], 'type': 'work', 'primary': True}],
+            'active': user['enabled'],
+            'groups': [{'value': self.group_id(g), 'display': g, 'type': 'direct'} for g in groups],
+        })
+        return resource
+
+    def scim(self, resource, headers, params):
+        if not self.scim_enabled:
+            return 404, {'error': 'not found'}
+        token = (headers or {}).get('Authorization', '').removeprefix('Bearer ')
+        try:
+            claims = jwt.decode(token, self.key.public_key(), algorithms=['RS256'], audience=SCIM_URL)
+        except jwt.PyJWTError:
+            return 401, {'status': '401', 'detail': 'Invalid token audience'}
+        if claims['azp'] not in self.service_accounts:
+            return 403, {'status': '403'}
+        if resource == 'Users':
+            items = [self.scim_user(username) for username in self.users]
+        else:
+            items = self.scim_groups()
+        params = params or {}
+        start = int(params.get('startIndex', 1))
+        count = min(int(params.get('count', self.scim_page_size)), self.scim_page_size)
+        page = items[start - 1:start - 1 + count]
+        return 200, {
+            'schemas': ['urn:ietf:params:scim:api:messages:2.0:ListResponse'],
+            'totalResults': len(items), 'startIndex': start, 'itemsPerPage': len(page), 'Resources': page,
+        }
+
     def end_session(self):
         for username in list(self.users):
             self.end_sessions_of(username)
@@ -176,6 +249,8 @@ class FakeKeycloak:
             status, body = self.token(data or {}, auth)
         elif path == endpoints['userinfo_endpoint']:
             status, body = self.userinfo(headers or {})
+        elif path in (f'{SCIM_URL}/Users', f'{SCIM_URL}/Groups'):
+            status, body = self.scim(path.rsplit('/', 1)[-1], headers, kwargs.get('params'))
         else:
             status, body = 404, {'error': 'not found'}
         response = requests.Response()

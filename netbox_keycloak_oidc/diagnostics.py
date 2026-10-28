@@ -5,6 +5,7 @@ Used by the status page and the `keycloak_oidc_check` management command.
 """
 from dataclasses import dataclass
 
+import jwt
 from django.conf import settings
 from django.shortcuts import resolve_url
 from django.urls import reverse
@@ -138,4 +139,47 @@ def run_diagnostics(request=None):
             logout_url = request.build_absolute_uri(logout_url)
         add('Post logout redirect URI', OK, f'Must be allowed in the Keycloak client: {logout_url}')
 
+    if get_setting('scim_enabled'):
+        run_scim_diagnostics(add)
+
     return results
+
+
+def run_scim_diagnostics(add):
+    from .scim import ScimClient
+
+    client = ScimClient()
+    try:
+        token = client.token
+    except HTTPError as e:
+        add('SCIM token', FAILED, f'{client.client_id}: HTTP {e.response.status_code} {e.response.text[:200]} '
+                                  f'(the client needs "Service accounts roles" enabled)')
+        return
+    except (AuthException, RequestException, KeyError, ValueError) as e:
+        add('SCIM token', FAILED, f'{client.client_id}: {e}')
+        return
+    add('SCIM token', OK, f'Client credentials grant for {client.client_id}')
+
+    claims = jwt.decode(token, options={'verify_signature': False})
+    audience = claims.get('aud') or []
+    if client.base_url not in ([audience] if isinstance(audience, str) else audience):
+        add('SCIM audience', FAILED, f'Access token lacks the audience {client.base_url}: add an Audience mapper '
+                                     f'(Included Custom Audience) to the client')
+        return
+    add('SCIM audience', OK, client.base_url)
+
+    for resource, role in (('Users', 'query-users / view-users'), ('Groups', 'query-groups')):
+        try:
+            total = client.get(resource, {'count': 1}).get('totalResults')
+            add(f'SCIM {resource}', OK, f'{total} {resource.lower()} readable')
+        except HTTPError as e:
+            status = e.response.status_code
+            hint = {
+                401: e.response.text[:200],
+                403: f'the service account needs the realm-management role(s) {role}',
+                404: 'SCIM API not found: enable it for the realm (Realm settings > General > SCIM API); '
+                     'requires Keycloak 26.8 or later',
+            }.get(status, e.response.text[:200])
+            add(f'SCIM {resource}', FAILED, f'HTTP {status}: {hint}')
+        except (AuthException, RequestException, ValueError) as e:
+            add(f'SCIM {resource}', FAILED, str(e))

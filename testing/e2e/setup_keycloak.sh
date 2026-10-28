@@ -30,4 +30,31 @@ $K add-roles -r netbox --uusername carol --cclientid netbox --rolename netbox-ad
 $K add-roles -r netbox --uusername dave --cclientid netbox --rolename netbox-user
 DAVE=$($K get users -r netbox -q username=dave -q exact=true --fields id --format csv --noquotes)
 $K update "users/$DAVE/groups/$GID" -r netbox -s realm=netbox -s userId="$DAVE" -s groupId="$GID" -n
+# Groups for the group sync (sync_groups_prefix 'nb-')
+NBOPS=$($K create groups -r netbox -i -s name=nb-dc-ops)
+$K create groups -r netbox -s name=nb-empty
+OTHER=$($K create groups -r netbox -i -s name=other-team)
+ALICE=$($K get users -r netbox -q username=alice -q exact=true --fields id --format csv --noquotes)
+$K update "users/$ALICE/groups/$NBOPS" -r netbox -s realm=netbox -s userId="$ALICE" -s groupId="$NBOPS" -n
+$K update "users/$ALICE/groups/$OTHER" -r netbox -s realm=netbox -s userId="$ALICE" -s groupId="$OTHER" -n
+$K update "users/$DAVE/groups/$NBOPS" -r netbox -s realm=netbox -s userId="$DAVE" -s groupId="$NBOPS" -n
+
+# SCIM (Keycloak >= 26.8): enable the API and create a read-only service account client
+if $K update realms/netbox -s scimApiEnabled=true; then
+  SC=$($K create clients -r netbox -i -s clientId=netbox-scim -s enabled=true -s publicClient=false \
+    -s standardFlowEnabled=false -s directAccessGrantsEnabled=false -s serviceAccountsEnabled=true \
+    -s fullScopeAllowed=false -s secret=scim-secret)
+  $K create "clients/$SC/protocol-mappers/models" -r netbox -s name=scim-audience -s protocol=openid-connect \
+    -s protocolMapper=oidc-audience-mapper \
+    -s "config={\"included.custom.audience\":\"${KEYCLOAK_URL:-http://localhost:8080}/realms/netbox/scim/v2\",\"access.token.claim\":\"true\",\"id.token.claim\":\"false\"}"
+  RM=$($K get clients -r netbox -q clientId=realm-management --fields id --format csv --noquotes)
+  ROLES=$($K get "clients/$RM/roles" -r netbox | python3 -c \
+    "import json,sys; print(json.dumps([r for r in json.load(sys.stdin) if r['name'] in ('view-users','query-users','query-groups')]))")
+  $K create "clients/$SC/scope-mappings/clients/$RM" -r netbox -b "$ROLES"
+  $K add-roles -r netbox --uusername service-account-netbox-scim --cclientid realm-management \
+    --rolename view-users --rolename query-users --rolename query-groups
+  echo "SCIM enabled"
+else
+  echo "SCIM API not available (requires Keycloak 26.8 or later)"
+fi
 echo "Realm netbox ready"

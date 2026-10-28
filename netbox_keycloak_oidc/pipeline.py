@@ -10,7 +10,7 @@ import time
 
 from django.conf import settings
 from social_core.exceptions import AuthForbidden
-from users.models import Group
+from users.models import Group, User
 
 from . import BACKEND_NAME
 from .utils import (
@@ -19,6 +19,7 @@ from .utils import (
     SESSION_REFRESH_TOKEN,
     SESSION_SUBJECT,
     get_setting,
+    is_synced_group,
 )
 
 logger = logging.getLogger('netbox_keycloak_oidc.pipeline')
@@ -27,6 +28,7 @@ logger = logging.getLogger('netbox_keycloak_oidc.pipeline')
 REQUEST_TOKENS_ATTR = '_keycloak_oidc_tokens'
 
 CHECK_ACCESS = 'netbox_keycloak_oidc.pipeline.check_access'
+LINK_EXISTING_USER = 'netbox_keycloak_oidc.pipeline.link_existing_user'
 SYNC_ROLES = 'netbox_keycloak_oidc.pipeline.sync_roles'
 REMEMBER_TOKENS = 'netbox_keycloak_oidc.pipeline.remember_tokens'
 
@@ -36,10 +38,14 @@ def build_pipeline(base_pipeline):
     Extend a pipeline with the Keycloak steps. The access check runs before the user is looked up or
     created, so users lacking a required role never get a NetBox account.
     """
-    pipeline = [step for step in base_pipeline if step not in (CHECK_ACCESS, SYNC_ROLES, REMEMBER_TOKENS)]
+    steps = (CHECK_ACCESS, LINK_EXISTING_USER, SYNC_ROLES, REMEMBER_TOKENS)
+    pipeline = [step for step in base_pipeline if step not in steps]
     anchor = 'social_core.pipeline.social_auth.social_uid'
     index = pipeline.index(anchor) + 1 if anchor in pipeline else 0
     pipeline.insert(index, CHECK_ACCESS)
+    anchor = 'social_core.pipeline.social_auth.social_user'
+    if anchor in pipeline:
+        pipeline.insert(pipeline.index(anchor) + 1, LINK_EXISTING_USER)
     pipeline += [SYNC_ROLES, REMEMBER_TOKENS]
     return tuple(pipeline)
 
@@ -66,17 +72,52 @@ def check_access(backend, response, details=None, *args, **kwargs):
         raise AuthForbidden(backend)
 
 
+def link_existing_user(backend, details, user=None, *args, **kwargs):
+    """
+    If enabled, use an existing NetBox user of the same name that is not yet linked to Keycloak, instead of
+    letting python-social-auth create a new user with a random suffix. associate_user links it afterwards.
+    """
+    if backend.name != BACKEND_NAME or user is not None or not get_setting('link_existing_users'):
+        return None
+    username = (details or {}).get('username')
+    existing = User.objects.filter(username=username).first() if username else None
+    if existing is None or existing.social_auth.filter(provider=BACKEND_NAME).exists():
+        return None
+    logger.info(f'Linking existing NetBox user {username} to Keycloak')
+    return {'user': existing}
+
+
 def sync_roles(backend, user, response, *args, **kwargs):
     """
     Map Keycloak roles to NetBox groups and the superuser flag.
     """
     if backend.name != BACKEND_NAME or user is None:
         return
-    roles = _roles(response)
+    apply_roles(user, _roles(response))
+    if get_setting('sync_groups'):
+        sync_groups(user, set((response or {}).get('keycloak_groups') or []))
+
+
+def apply_roles(user, roles, visible=None):
+    """
+    Apply superuser_roles and group_mapping to a user holding the given Keycloak roles.
+
+    `visible` is the set of role names the caller is able to see (None: all of them). SCIM only exposes
+    Keycloak groups, not roles, so a sync must not revoke anything that might be granted by a role it
+    cannot see: superuser status is only revoked if all superuser_roles are visible, and NetBox groups
+    are only removed if every mapping entry leading to them is visible.
+    """
+    def is_visible(role):
+        return visible is None or role in visible
 
     superuser_roles = set(get_setting('superuser_roles'))
     if superuser_roles:
-        is_superuser = bool(superuser_roles & roles)
+        if superuser_roles & roles:
+            is_superuser = True
+        elif all(is_visible(role) for role in superuser_roles):
+            is_superuser = False
+        else:
+            is_superuser = user.is_superuser
         if user.is_superuser != is_superuser:
             user.is_superuser = is_superuser
             user.save(update_fields=['is_superuser'])
@@ -89,8 +130,9 @@ def sync_roles(backend, user, response, *args, **kwargs):
     def as_list(value):
         return [value] if isinstance(value, str) else list(value)
 
-    managed = {name for names in group_mapping.values() for name in as_list(names)}
     wanted = {name for role, names in group_mapping.items() if role in roles for name in as_list(names)}
+    managed = {name for role, names in group_mapping.items() if is_visible(role) for name in as_list(names)}
+    managed -= {name for role, names in group_mapping.items() if not is_visible(role) for name in as_list(names)}
 
     groups = []
     for name in sorted(wanted):
@@ -104,14 +146,52 @@ def sync_roles(backend, user, response, *args, **kwargs):
                 logger.error(f'Cannot assign group {name} to {user}: group does not exist')
                 continue
         groups.append(group)
-    if groups:
-        user.groups.add(*groups)
+    new_groups = [group for group in groups if not user.groups.filter(pk=group.pk).exists()]
+    if new_groups:
+        logger.info(f'Adding {user} to groups {sorted(group.name for group in new_groups)}')
+        user.groups.add(*new_groups)
 
     if get_setting('remove_unmapped_groups'):
         stale = user.groups.filter(name__in=managed - wanted)
         if stale.exists():
             logger.info(f'Removing {user} from groups {sorted(stale.values_list("name", flat=True))}')
             user.groups.remove(*stale)
+
+
+def mapped_group_names():
+    group_mapping = get_setting('group_mapping') or {}
+    return {name for names in group_mapping.values() for name in ([names] if isinstance(names, str) else names)}
+
+
+def sync_groups(user, keycloak_groups):
+    """
+    Mirror Keycloak groups as NetBox groups of the same name (see the sync_groups setting).
+
+    The user is added to (and, if necessary, creates) the NetBox group of each Keycloak group that passes the
+    prefix/exclusion filter, and removed from every other NetBox group that passes the filter. Groups that are
+    targets of group_mapping are left to the mapping.
+    """
+    mapped = mapped_group_names()
+    wanted = {name for name in keycloak_groups if is_synced_group(name)} - mapped
+
+    groups = []
+    for name in sorted(wanted):
+        group, created = Group.objects.get_or_create(name=name)
+        if created:
+            logger.info(f'Created NetBox group {name} from Keycloak')
+        groups.append(group)
+    new_groups = [group for group in groups if not user.groups.filter(pk=group.pk).exists()]
+    if new_groups:
+        logger.info(f'Adding {user} to groups {sorted(group.name for group in new_groups)}')
+        user.groups.add(*new_groups)
+
+    stale = [
+        group for group in user.groups.exclude(name__in=wanted | mapped)
+        if is_synced_group(group.name)
+    ]
+    if stale:
+        logger.info(f'Removing {user} from groups {sorted(group.name for group in stale)}')
+        user.groups.remove(*stale)
 
 
 def remember_tokens(strategy, backend, response, *args, **kwargs):

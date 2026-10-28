@@ -44,3 +44,30 @@ def extract_roles(claims, client_id=None, sources=None):
             roles.add(group.rstrip('/').rsplit('/', 1)[-1])
     roles.discard('')
     return roles
+
+
+def group_name(group):
+    """
+    Return the plain name of a Keycloak group given as a path ("/parent/child") or a name.
+    """
+    return (group or '').rstrip('/').rsplit('/', 1)[-1]
+
+
+def extract_groups(claims):
+    """
+    Return the names of the Keycloak groups listed in the "groups" claim.
+    """
+    names = {group_name(group) for group in claims.get('groups') or [] if isinstance(group, str)}
+    names.discard('')
+    return names
+
+
+def is_synced_group(name):
+    """
+    Whether a Keycloak group is mirrored to NetBox by sync_groups (prefix filter and exclusions).
+    """
+    return (
+        bool(name)
+        and name.startswith(get_setting('sync_groups_prefix') or '')
+        and name not in set(get_setting('sync_groups_exclude') or [])
+    )
