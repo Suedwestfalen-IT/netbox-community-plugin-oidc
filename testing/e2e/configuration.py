@@ -13,6 +13,12 @@ PLUGINS_CONFIG = {
         'group_mapping': {'netbox-operators': ['Operators'], 'netbox-user': ['Readers']},
         'auto_create_groups': True,
         'session_check_interval': 5,
+        'sync_groups': True,
+        'sync_groups_prefix': 'nb-',
+        'scim_enabled': True,
+        'scim_client_id': 'netbox-scim',
+        'scim_client_secret': 'scim-secret',
+        'scim_sync_interval': 1,
     },
 }
 REMOTE_AUTH_BACKEND = 'netbox_keycloak_oidc.backends.KeycloakOIDC'

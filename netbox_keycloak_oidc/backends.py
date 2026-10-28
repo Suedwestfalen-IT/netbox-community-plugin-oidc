@@ -1,12 +1,13 @@
 import logging
 
 import jwt
+from django.conf import settings
 from social_core.backends.oauth import BaseOAuth2PKCE
 from social_core.backends.open_id_connect import OpenIdConnectAuth
 from social_core.exceptions import AuthTokenError
 
 from . import BACKEND_NAME
-from .utils import extract_roles
+from .utils import extract_groups, extract_roles
 
 logger = logging.getLogger('netbox_keycloak_oidc.backend')
 
@@ -36,6 +37,13 @@ class KeycloakOIDC(OpenIdConnectAuth, BaseOAuth2PKCE):
     DEFAULT_USE_PKCE = True
     # RFC 7636 spells the method "S256"; social-auth-core < 5 defaults to "s256", which Keycloak rejects
     PKCE_DEFAULT_CODE_CHALLENGE_METHOD = 'S256'
+
+    def setting(self, name, default=None):
+        value = super().setting(name, default)
+        if name == 'PROXIES' and not value:
+            # Fall back to NetBox's HTTP_PROXIES, which python-social-auth does not use on its own
+            value = getattr(settings, 'HTTP_PROXIES', None) or default
+        return value
 
     def oidc_endpoint(self):
         return (super().oidc_endpoint() or '').rstrip('/')
@@ -69,19 +77,23 @@ class KeycloakOIDC(OpenIdConnectAuth, BaseOAuth2PKCE):
 
     def get_roles(self, access_token, *claim_sets):
         """
-        Return the set of Keycloak roles found in the verified access token and the given claim sets.
+        Return the Keycloak roles and the Keycloak group names found in the verified access token and the
+        given claim sets.
         """
-        roles = set()
+        sources = [claims for claims in claim_sets if claims]
         try:
-            roles |= extract_roles(self.decode_access_token(access_token), self.setting('KEY'))
+            sources.insert(0, self.decode_access_token(access_token))
         except (AuthTokenError, ValueError) as e:
             logger.warning(f'Unable to read roles from the Keycloak access token: {e}')
-        for claims in claim_sets:
-            if claims:
-                roles |= extract_roles(claims, self.setting('KEY'))
-        return roles
+        roles, groups = set(), set()
+        for claims in sources:
+            roles |= extract_roles(claims, self.setting('KEY'))
+            groups |= extract_groups(claims)
+        return roles, groups
 
     def user_data(self, access_token, *args, **kwargs):
         data = super().user_data(access_token, *args, **kwargs) or {}
-        data['keycloak_roles'] = sorted(self.get_roles(access_token, self.id_token, data))
+        roles, groups = self.get_roles(access_token, self.id_token, data)
+        data['keycloak_roles'] = sorted(roles)
+        data['keycloak_groups'] = sorted(groups)
         return data
