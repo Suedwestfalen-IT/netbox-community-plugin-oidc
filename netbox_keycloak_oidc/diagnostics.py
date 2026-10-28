@@ -6,12 +6,14 @@ Used by the status page and the `keycloak_oidc_check` management command.
 from dataclasses import dataclass
 
 from django.conf import settings
+from django.shortcuts import resolve_url
 from django.urls import reverse
 from requests import HTTPError, RequestException
 from social_core.exceptions import AuthException
 from social_django.utils import load_backend, load_strategy
 
 from . import BACKEND_NAME
+from .utils import get_setting
 
 BACKEND_PATH = 'netbox_keycloak_oidc.backends.KeycloakOIDC'
 
@@ -130,5 +132,10 @@ def run_diagnostics(request=None):
         add('Client credentials', FAILED, str(e))
 
     add('Redirect URI', OK, f'Must be allowed in the Keycloak client: {get_redirect_uri(request)}')
+    if config.get('end_session_endpoint') and get_setting('logout_from_keycloak'):
+        logout_url = resolve_url(settings.LOGOUT_REDIRECT_URL)
+        if request is not None:
+            logout_url = request.build_absolute_uri(logout_url)
+        add('Post logout redirect URI', OK, f'Must be allowed in the Keycloak client: {logout_url}')
 
     return results

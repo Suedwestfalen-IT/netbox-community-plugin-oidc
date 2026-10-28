@@ -29,7 +29,8 @@ if you include `/auth` in the endpoint).
    * Client type: **OpenID Connect**, Client ID e.g. `netbox`
    * **Client authentication: On** (confidential client), **Standard flow: On**. All other flows can be off.
    * Valid redirect URIs: `https://netbox.example.com/oauth/complete/keycloak-oidc/`
-   * Valid post logout redirect URIs: `https://netbox.example.com/*` (or `+`)
+   * Valid post logout redirect URIs: `https://netbox.example.com/*`. Do not use `+` here: it only allows
+     the redirect URI above, so Keycloak would refuse to send users back to NetBox after logout.
 2. Copy the client secret from *Credentials*.
 3. Create the roles you want to use, e.g. client roles `netbox-user` and `netbox-admin` (*Clients → netbox →
    Roles*), and assign them to users or groups. To use group memberships instead, add a *Group Membership*
@@ -98,6 +99,7 @@ python manage.py keycloak_oidc_check
 [OK     ] Logout endpoint: https://sso.example.com/realms/netbox/protocol/openid-connect/logout
 [OK     ] Client credentials: Accepted by Keycloak
 [OK     ] Redirect URI: Must be allowed in the Keycloak client: /oauth/complete/keycloak-oidc/
+[OK     ] Post logout redirect URI: Must be allowed in the Keycloak client: /
 ```
 
 The same checks are available in the UI under *Plugins → Keycloak OIDC Status* (superusers only), which
